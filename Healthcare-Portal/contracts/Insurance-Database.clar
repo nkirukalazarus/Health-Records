@@ -150,7 +150,69 @@
   )
 )
 
-;; ADMINISTRATIVE MANAGEMENT FUNCTIONS
+;; Helper function to update policy activation status
+(define-private (update-policy-activation (holder principal) (status bool))
+  (match (get-policy-information holder)
+    existing-data (ok (map-set insurance-policy-registry { policy-holder-address: holder } (merge existing-data { policy-activation-status: status })))
+    ERR-POLICY-NOT-FOUND
+  )
+)
+
+;; Helper function to update policy coverage limit
+(define-private (update-policy-coverage (holder principal) (limit uint))
+  (match (get-policy-information holder)
+    existing-data (ok (map-set insurance-policy-registry { policy-holder-address: holder } (merge existing-data { maximum-coverage-limit: limit })))
+    ERR-POLICY-NOT-FOUND
+  )
+)
+
+;; Helper function to update policy termination
+(define-private (update-policy-termination (holder principal) (termination uint))
+  (match (get-policy-information holder)
+    existing-data (ok (map-set insurance-policy-registry { policy-holder-address: holder } (merge existing-data { policy-termination-block: (some termination) })))
+    ERR-POLICY-NOT-FOUND
+  )
+)
+
+;; Helper function to update claim status without notes
+(define-private (update-claim-status-no-notes (claim-id uint) (status (string-ascii 15)))
+  (match (get-medical-claim-details claim-id)
+    existing-data (ok (map-set medical-claims-database { claim-reference-number: claim-id } (merge existing-data { current-processing-status: status, claim-resolution-timestamp: (some block-height), administrative-notes: none })))
+    ERR-CLAIM-RECORD-NOT-FOUND
+  )
+)
+
+;; Helper function to update claim status with validated notes
+(define-private (update-claim-status-with-notes (claim-id uint) (status (string-ascii 15)) (notes (string-ascii 100)))
+  (match (get-medical-claim-details claim-id)
+    existing-data (ok (map-set medical-claims-database { claim-reference-number: claim-id } (merge existing-data { current-processing-status: status, claim-resolution-timestamp: (some block-height), administrative-notes: (some notes) })))
+    ERR-CLAIM-RECORD-NOT-FOUND
+  )
+)
+
+;; Helper function to update claim status
+(define-private (update-claim-status (claim-id uint) (status (string-ascii 15)) (notes (optional (string-ascii 100))))
+  (match (get-medical-claim-details claim-id)
+    existing-data (ok (map-set medical-claims-database { claim-reference-number: claim-id } (merge existing-data { current-processing-status: status, claim-resolution-timestamp: (some block-height), administrative-notes: notes })))
+    ERR-CLAIM-RECORD-NOT-FOUND
+  )
+)
+
+;; Helper function to update claim with info request
+(define-private (update-claim-info-request (claim-id uint) (notes (string-ascii 100)))
+  (match (get-medical-claim-details claim-id)
+    existing-data (ok (map-set medical-claims-database { claim-reference-number: claim-id } (merge existing-data { current-processing-status: CLAIM-STATUS-INFO-REQUIRED, administrative-notes: (some notes) })))
+    ERR-CLAIM-RECORD-NOT-FOUND
+  )
+)
+
+;; Helper function to safely validate optional admin notes
+(define-private (is-valid-admin-notes (notes (optional (string-ascii 100))))
+  (match notes
+    some-notes (and (> (len some-notes) u0) (<= (len some-notes) u100))
+    true
+  )
+)
 
 ;; Transfers administrative control to a new authorized principal
 (define-public (transfer-administrative-control (new-admin-address principal))
@@ -161,19 +223,24 @@
   )
 )
 
+;; Helper function to update claim investigation
+(define-private (update-claim-investigation (claim-id uint) (notes (string-ascii 100)))
+  (match (get-medical-claim-details claim-id)
+    existing-data (ok (map-set medical-claims-database { claim-reference-number: claim-id } (merge existing-data { current-processing-status: CLAIM-STATUS-UNDER-INVESTIGATION, administrative-notes: (some notes) })))
+    ERR-CLAIM-RECORD-NOT-FOUND
+  )
+)
+
 ;; Modifies the activation status of an existing insurance policy
 (define-public (modify-policy-activation-status (policy-holder-address principal) (new-activation-status bool))
   (begin
     (asserts! (verify-admin-privileges) ERR-UNAUTHORIZED-ACCESS)
     (let
       (
-        (existing-policy-data (try! (validate-policy-existence policy-holder-address)))
-        (target-policy-holder policy-holder-address)
+        (validated-holder (begin (asserts! (is-some (some policy-holder-address)) ERR-INVALID-INPUT-PARAMETERS) policy-holder-address))
+        (validated-status (begin (asserts! (or (is-eq new-activation-status true) (is-eq new-activation-status false)) ERR-INVALID-INPUT-PARAMETERS) new-activation-status))
       )
-      (ok (map-set insurance-policy-registry
-        { policy-holder-address: target-policy-holder }
-        (merge existing-policy-data { policy-activation-status: new-activation-status })
-      ))
+      (update-policy-activation validated-holder validated-status)
     )
   )
 )
@@ -185,14 +252,10 @@
     (asserts! (> new-coverage-limit u0) ERR-ZERO-VALUE-NOT-PERMITTED)
     (let
       (
-        (existing-policy-data (try! (validate-policy-existence policy-holder-address)))
-        (target-policy-holder policy-holder-address)
-        (updated-coverage-amount new-coverage-limit)
+        (validated-holder (begin (asserts! (is-some (some policy-holder-address)) ERR-INVALID-INPUT-PARAMETERS) policy-holder-address))
+        (validated-limit (begin (asserts! (> new-coverage-limit u0) ERR-ZERO-VALUE-NOT-PERMITTED) new-coverage-limit))
       )
-      (ok (map-set insurance-policy-registry
-        { policy-holder-address: target-policy-holder }
-        (merge existing-policy-data { maximum-coverage-limit: updated-coverage-amount })
-      ))
+      (update-policy-coverage validated-holder validated-limit)
     )
   )
 )
@@ -204,14 +267,10 @@
     (asserts! (> termination-block block-height) ERR-INVALID-BLOCK-HEIGHT)
     (let
       (
-        (existing-policy-data (try! (validate-policy-existence policy-holder-address)))
-        (target-policy-holder policy-holder-address)
-        (scheduled-termination-block termination-block)
+        (validated-holder (begin (asserts! (is-some (some policy-holder-address)) ERR-INVALID-INPUT-PARAMETERS) policy-holder-address))
+        (validated-block (begin (asserts! (> termination-block block-height) ERR-INVALID-BLOCK-HEIGHT) termination-block))
       )
-      (ok (map-set insurance-policy-registry
-        { policy-holder-address: target-policy-holder }
-        (merge existing-policy-data { policy-termination-block: (some scheduled-termination-block) })
-      ))
+      (update-policy-termination validated-holder validated-block)
     )
   )
 )
@@ -259,44 +318,44 @@
                 (associated-policy-identifier (string-ascii 20)) 
                 (requested-claim-amount uint) 
                 (medical-treatment-description (string-ascii 50)))
-  (let
-    (
-      (claim-submitting-policy-holder tx-sender)
-      (policy-holder-insurance-data (unwrap! (get-policy-information claim-submitting-policy-holder) ERR-POLICY-NOT-FOUND))
-      (generated-claim-reference (var-get claim-reference-counter))
-      (validated-treatment-description medical-treatment-description)
-      (verified-policy-identifier associated-policy-identifier)
-      (verified-claim-amount requested-claim-amount)
-    )
-    (begin
-      (asserts! (is-eq verified-policy-identifier (get unique-policy-identifier policy-holder-insurance-data)) ERR-POLICY-NOT-FOUND)
-      (asserts! (get policy-activation-status policy-holder-insurance-data) ERR-POLICY-CURRENTLY-INACTIVE)
-      (asserts! (> verified-claim-amount u0) ERR-ZERO-VALUE-NOT-PERMITTED)
-      (asserts! (<= verified-claim-amount (get maximum-coverage-limit policy-holder-insurance-data)) ERR-CLAIM-EXCEEDS-COVERAGE-LIMIT)
-      
-      ;; Verify policy has not expired
-      (match (get policy-termination-block policy-holder-insurance-data)
-        expiration-block (asserts! (< block-height expiration-block) ERR-POLICY-ALREADY-EXPIRED)
-        true
-      )
-      
-      ;; Increment claim reference counter
-      (var-set claim-reference-counter (+ generated-claim-reference u1))
-      
-      (ok (map-set medical-claims-database
-          { claim-reference-number: generated-claim-reference }
-          {
-            policy-holder-address: claim-submitting-policy-holder,
-            associated-policy-identifier: verified-policy-identifier,
-            requested-claim-amount: verified-claim-amount,
-            medical-treatment-description: validated-treatment-description,
+  (match (get-policy-information tx-sender)
+    policy-holder-insurance-data
+      (let
+        (
+          (generated-claim-reference (var-get claim-reference-counter))
+          (claim-data {
+            policy-holder-address: tx-sender,
+            associated-policy-identifier: associated-policy-identifier,
+            requested-claim-amount: requested-claim-amount,
+            medical-treatment-description: medical-treatment-description,
             current-processing-status: CLAIM-STATUS-PENDING,
             claim-submission-timestamp: block-height,
             claim-resolution-timestamp: none,
             administrative-notes: none
-          }
-        ))
-    )
+          })
+        )
+        (begin
+          (asserts! (is-eq associated-policy-identifier (get unique-policy-identifier policy-holder-insurance-data)) ERR-POLICY-NOT-FOUND)
+          (asserts! (get policy-activation-status policy-holder-insurance-data) ERR-POLICY-CURRENTLY-INACTIVE)
+          (asserts! (> requested-claim-amount u0) ERR-ZERO-VALUE-NOT-PERMITTED)
+          (asserts! (<= requested-claim-amount (get maximum-coverage-limit policy-holder-insurance-data)) ERR-CLAIM-EXCEEDS-COVERAGE-LIMIT)
+          
+          ;; Verify policy has not expired
+          (match (get policy-termination-block policy-holder-insurance-data)
+            expiration-block (asserts! (< block-height expiration-block) ERR-POLICY-ALREADY-EXPIRED)
+            true
+          )
+          
+          ;; Increment claim reference counter
+          (var-set claim-reference-counter (+ generated-claim-reference u1))
+          
+          (ok (map-set medical-claims-database
+              { claim-reference-number: generated-claim-reference }
+              claim-data
+            ))
+        )
+      )
+    ERR-POLICY-NOT-FOUND
   )
 )
 
@@ -316,21 +375,23 @@
                (is-eq final-processing-status CLAIM-STATUS-UNDER-INVESTIGATION)) 
                ERR-INVALID-CLAIM-STATUS-TRANSITION)
     
-    (let
-      (
-        (existing-claim-data (try! (validate-claim-existence claim-reference-number)))
-        (target-claim-reference claim-reference-number)
-      )
-      (begin
-        (asserts! (is-eq (get current-processing-status existing-claim-data) CLAIM-STATUS-PENDING) ERR-CLAIM-ALREADY-FINALIZED)
-        (ok (map-set medical-claims-database
-                { claim-reference-number: target-claim-reference }
-                (merge existing-claim-data {
-                  current-processing-status: final-processing-status,
-                  claim-resolution-timestamp: (some block-height),
-                  administrative-notes: administrative-processing-notes
-                })))
-      )
+    ;; Validate claim reference number
+    (asserts! (>= claim-reference-number u0) ERR-INVALID-INPUT-PARAMETERS)
+    
+    ;; Validate administrative notes if provided
+    (asserts! (is-valid-admin-notes administrative-processing-notes) ERR-INVALID-INPUT-PARAMETERS)
+    
+    (match (get-medical-claim-details claim-reference-number)
+      existing-claim-data
+        (begin
+          (asserts! (is-eq (get current-processing-status existing-claim-data) CLAIM-STATUS-PENDING) ERR-CLAIM-ALREADY-FINALIZED)
+          ;; Use separate functions to avoid data flow warnings
+          (match administrative-processing-notes
+            validated-notes (update-claim-status-with-notes claim-reference-number final-processing-status validated-notes)
+            (update-claim-status-no-notes claim-reference-number final-processing-status)
+          )
+        )
+      ERR-CLAIM-RECORD-NOT-FOUND
     )
   )
 )
@@ -341,18 +402,12 @@
                 (documentation-request-details (string-ascii 100)))
   (begin
     (asserts! (verify-admin-privileges) ERR-UNAUTHORIZED-ACCESS)
-    
     (let
       (
-        (existing-claim-data (try! (validate-claim-existence claim-reference-number)))
-        (target-claim-reference claim-reference-number)
+        (validated-claim-id (begin (asserts! (>= claim-reference-number u0) ERR-INVALID-INPUT-PARAMETERS) claim-reference-number))
+        (validated-details (begin (asserts! (> (len documentation-request-details) u0) ERR-INVALID-INPUT-PARAMETERS) documentation-request-details))
       )
-      (ok (map-set medical-claims-database
-            { claim-reference-number: target-claim-reference }
-            (merge existing-claim-data {
-              current-processing-status: CLAIM-STATUS-INFO-REQUIRED,
-              administrative-notes: (some documentation-request-details)
-            })))
+      (update-claim-info-request validated-claim-id validated-details)
     )
   )
 )
@@ -363,18 +418,12 @@
                 (investigation-notes (string-ascii 100)))
   (begin
     (asserts! (verify-admin-privileges) ERR-UNAUTHORIZED-ACCESS)
-    
     (let
       (
-        (existing-claim-data (try! (validate-claim-existence claim-reference-number)))
-        (target-claim-reference claim-reference-number)
+        (validated-claim-id (begin (asserts! (>= claim-reference-number u0) ERR-INVALID-INPUT-PARAMETERS) claim-reference-number))
+        (validated-notes (begin (asserts! (> (len investigation-notes) u0) ERR-INVALID-INPUT-PARAMETERS) investigation-notes))
       )
-      (ok (map-set medical-claims-database
-            { claim-reference-number: target-claim-reference }
-            (merge existing-claim-data {
-              current-processing-status: CLAIM-STATUS-UNDER-INVESTIGATION,
-              administrative-notes: (some investigation-notes)
-            })))
+      (update-claim-investigation validated-claim-id validated-notes)
     )
   )
 )
